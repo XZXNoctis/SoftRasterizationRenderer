@@ -1,14 +1,28 @@
+#define _CRT_SECURE_NO_DEPRECATE
+#define _USE_MATH_DEFINES
 #include <limits>
 #include <cmath>
 #include <iostream>
 #include <fstream>
 #include <vector>
+#include <algorithm>
+#define STB_IMAGE_WRITE_IMPLEMENTATION
+#include "stb_image_write.h"
+#define STB_IMAGE_IMPLEMENTATION
+#include "stb_image.h"
 #include "geometry.h"
-#define M_PI 3.1415926
+#include "Model.h"
+#define M_PI 3.14159265358979323846
+
+//Backbround
+int envmap_width, envmap_height;
+std::vector<Vec3f>envmap;
+//Model(.obj)
+Model duck("duck.obj");
 
 struct Light
 {
-	Light(const Vec3f &p, const float i) : position(p), intensity(i) {}
+	Light(const Vec3f& p, const float i) : position(p), intensity(i) {}
 
 	Vec3f position;
 	float intensity;
@@ -46,7 +60,7 @@ struct Sphere {
 
 };
 
-Vec3f reflect(const Vec3f &I, const Vec3f &N) {
+Vec3f reflect(const Vec3f& I, const Vec3f& N) {
 	return I - N * 2.f * (I * N);
 }
 
@@ -72,10 +86,10 @@ bool scene_intersect(const Vec3f& orig, const Vec3f& dir, const std::vector<Sphe
 	//return spheres_dist < 1000;
 
 	float checkerboard_dist = std::numeric_limits<float>::max();
-	if (fabs(dir.y)>1e-3) {
+	if (fabs(dir.y) > 1e-3) {
 		float d = -(orig.y + 4) / dir.y;//the checkboard plane has equation y = -4;
 		Vec3f pt = orig + dir * d;
-		if (d>0 && fabs(pt.x)<10&&pt.z<-10&&pt.z>-30&&d<spheres_dist) {
+		if (d > 0 && fabs(pt.x) < 10 && pt.z<-10 && pt.z>-30 && d < spheres_dist) {
 			checkerboard_dist = d;
 			hit = pt;
 			N = Vec3f(0, 1, 0);
@@ -86,11 +100,11 @@ bool scene_intersect(const Vec3f& orig, const Vec3f& dir, const std::vector<Sphe
 	return std::min(spheres_dist, checkerboard_dist) < 1000;
 }
 
-Vec3f cast_ray(const Vec3f& orig, const Vec3f& dir, const std::vector <Sphere> & spheres,const std::vector<Light> &lights,size_t depth=0) {
+Vec3f cast_ray(const Vec3f& orig, const Vec3f& dir, const std::vector <Sphere>& spheres, const std::vector<Light>& lights, size_t depth = 0) {
 	/*float sphere_dist = std::numeric_limits<float>::max();*/
 	Vec3f point, N;
 	Material material;
-	if (depth>4||!scene_intersect(orig, dir, spheres, point, N, material)) {
+	if (depth > 4 || !scene_intersect(orig, dir, spheres, point, N, material)) {
 		return Vec3f(0.2, 0.7, 0.8);//background color
 	}
 	//return Vec3f(0.4, 0.4, 0.3);
@@ -106,19 +120,27 @@ Vec3f cast_ray(const Vec3f& orig, const Vec3f& dir, const std::vector <Sphere> &
 	float diffuse_light_intensity = 0, specular_light_intensity = 0;
 	for (size_t i = 0; i < lights.size(); i++) {
 		Vec3f light_dir = (lights[i].position - point).normalize();
+		float light_distance = (lights[i].position - point).norm();
+
+		Vec3f shadow_orig = light_dir * N < 0 ? point - N * 1e-3 : point + N * 1e-3; // checking if the point lies in the shadow of the lights[i]
+		Vec3f shadow_pt, shadow_N;
+		Material tmpmaterial;
+		if (scene_intersect(shadow_orig, light_dir, spheres, shadow_pt, shadow_N, tmpmaterial) && (shadow_pt - shadow_orig).norm() < light_distance)
+			continue;
+
 		diffuse_light_intensity += lights[i].intensity * std::max(0.f, light_dir * N);
-		specular_light_intensity += powf(std::max(0.f,-reflect(-light_dir,N)*dir),material.specular_exponent)*lights[i].intensity;
+		specular_light_intensity += powf(std::max(0.f, -reflect(-light_dir, N) * dir), material.specular_exponent) * lights[i].intensity;
 	}
 	return material.diffuse_color * diffuse_light_intensity * material.albedo[0] + Vec3f(1., 1., 1.) * specular_light_intensity * material.albedo[1] + reflect_color * material.albedo[2] + refract_color * material.albedo[3];
 }
 
-void render(const std::vector <Sphere> &spheres,const std::vector<Light> &lights) {
+void render(const std::vector <Sphere>& spheres, const std::vector<Light>& lights) {
 	const int width = 1024;
 	const int height = 768;
-	const int fov = M_PI / 2.;
+	const int fov = M_PI / 3.;
 	std::vector<Vec3f> framebuffer(width * height);
 
-	#pragma omp parallel for
+#pragma omp parallel for
 	for (size_t j = 0; j < height; j++) { // actual rendering loop
 		for (size_t i = 0; i < width; i++) {
 			//framebuffer[i + j * width] = Vec3f(j / float(height), i / float(width), 0);
@@ -128,7 +150,19 @@ void render(const std::vector <Sphere> &spheres,const std::vector<Light> &lights
 			framebuffer[i + j * width] = cast_ray(Vec3f(0, 0, 0), Vec3f(dir_x, dir_y, dir_z).normalize(), spheres, lights);
 		}
 	}
+	//output is .jpg
+	std::vector<unsigned char> pixmap(width * height * 3);
+	for (size_t i = 0; i < height * width; ++i) {
+		Vec3f& c = framebuffer[i];
+		float max = std::max(c[0], std::max(c[1], c[2]));
+		if (max > 1) c = c * (1. / max);
+		for (size_t j = 0; j < 3; j++) {
+			pixmap[i * 3 + j] = (unsigned char)(255 * std::max(0.f, std::min(1.f, framebuffer[i][j])));
+		}
+	}
+	stbi_write_jpg("out.jpg", width, height, 3, pixmap.data(), 100);
 
+	//output is .ppm
 	std::ofstream ofs; // save the framebuffer to file
 	ofs.open("./out.ppm", std::ios::binary);
 	ofs << "P6\n" << width << " " << height << "\n255\n";
@@ -148,6 +182,19 @@ void render(const std::vector <Sphere> &spheres,const std::vector<Light> &lights
 int main() {
 	//Sphere sphere(Vec3f(-3, 0, -16), 2);
 	//render(sphere);
+	int n = -1;
+	unsigned char* pixmap = stbi_load("envmap.jpg", &envmap_width, &envmap_height, &n, 0);
+	if (!pixmap || 3 != n) {
+		std::cerr << "Error: can not load the environment map" << std::endl;
+		return -1;
+	}
+	envmap = std::vector<Vec3f>(envmap_width * envmap_height);
+	for (int j = envmap_height - 1; j >= 0; j--) {
+		for (int i = 0; i < envmap_width; i++) {
+			envmap[i + j * envmap_width] = Vec3f(pixmap[(i + j * envmap_width) * 3 + 0], pixmap[(i + j * envmap_width) * 3 + 1], pixmap[(i + j * envmap_width) * 3 + 2]) * (1 / 255.);
+		}
+	}
+	stbi_image_free(pixmap);
 
 	Material      ivory(1.0, Vec4f(0.6, 0.3, 0.1, 0.0), Vec3f(0.4, 0.4, 0.3), 50.);
 	Material      glass(1.5, Vec4f(0.0, 0.5, 0.1, 0.8), Vec3f(0.6, 0.7, 0.8), 125.);
@@ -165,7 +212,7 @@ int main() {
 	lights.push_back(Light(Vec3f(30, 50, -25), 1.8));
 	lights.push_back(Light(Vec3f(30, 20, 30), 1.7));
 
-	render(spheres,lights);
+	render(spheres, lights);
 
 	return 0;
 }
